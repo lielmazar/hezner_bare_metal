@@ -1,0 +1,19 @@
+CRYPTPASSWORD {{ luks_passphrase }}
+DRIVE1 /dev/nvme0n1
+DRIVE2 /dev/nvme1n1
+SWRAID 1
+SWRAIDLEVEL 1
+BOOTLOADER grub
+HOSTNAME dubuntu2204
+PART /boot/efi esp 256M
+PART /boot ext4 1G
+PART lvm vg0 all crypt
+LV vg0 swap swap swap 32G
+LV vg0 root / ext4 20G
+LV vg0 var /var ext4 20G
+LV vg0 var_tmp /var/tmp ext4 20G
+LV vg0 var_log /var/log ext4 20G
+LV vg0 var_log_audit /var/log/audit ext4 20G
+LV vg0 home /home ext4 20G
+IMAGE /root/images/Ubuntu-2204-jammy-amd64-base.tar.gz
+SSHKEYS_URL /tmp/authorized_keys
