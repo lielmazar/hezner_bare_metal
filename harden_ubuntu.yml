@@ -1,0 +1,48 @@
+- name: harden_ubuntu
+  hosts: myhosts
+  gather_facts: false
+  vars_prompt:
+    - name: luks_passphrase
+      prompt: "Enter LUKS disk encryption passphrase"
+      private: true
+    - name: admin_fullname
+      prompt: "Enter admin full name"
+      private: false
+    - name: admin_email
+      prompt: "Enter admin email"
+      private: false
+    - name: admin_pass
+      prompt: "Enter admin password"
+      private: true
+    - name: pro_token
+      prompt: "Enter Ubuntu Pro token"
+      private: true
+  vars:
+    local_public_key: "{{ lookup('env','HOME') }}/.ssh/id_ed25519.pub"
+    local_private_key: "{{ lookup('env','HOME') }}/.ssh/id_ed25519"
+    dropbear_port: 22
+
+  pre_tasks:
+    - name: Remove old SSH key for sv1.cservices.co.il
+      delegate_to: localhost
+      shell: ssh-keygen -R sv1.cservices.co.il
+      register: ssh_keygen_result
+      changed_when: "'updated' in ssh_keygen_result.stdout"
+
+    - name: Accept and store SSH host key permanently
+      delegate_to: localhost
+      shell: |
+        ssh -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            -p {{ dropbear_port | default(22) }} \
+            root@{{ inventory_hostname }} "echo SSH key accepted"
+      register: ssh_key_accept
+      changed_when: false
+      failed_when: false
+  tasks:
+    - name: Gather facts manually after cleanup
+      setup:
+
+    - name: hardenening Ubuntu
+      import_role:
+        name: harden_ubuntu
