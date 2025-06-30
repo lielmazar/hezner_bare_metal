@@ -5,19 +5,32 @@ This folder contains Ansible configuration for managing the server `sv1.cservice
 ## Files
 
 - `inventory.ini` defines the target hosts.
-- `playbook.yml` provisions the server using the same steps as the original `v2.sh` setup script.
+- `install_encrypted_ubuntu_from_rescue.yml` installing encrypted ubuntu 22.04 with hezner's installimage script from rescue.
 - `templates/setup.conf.j2` is a templated version of `setup.conf` used during installation.
 
 ## Usage
 
-Run the playbook from this directory with:
+### Activate the virtual environment:
+```
+source .venv/bin/activate    # For Linux / macOS
+```
+```
+.venv\Scripts\activate     # For Windows (if relevant)
+```
+
+Upgrade pip (recommended)
+```
+pip install --upgrade pip
+```
+Install project dependencies
+```
+pip install -r requirements.txt
+```
+
+### Run the playbook from this directory with:
 
 ```bash
 eval $(ssh-agent -s)
 ssh-add ~/.ssh/id_ed25519
-ansible-playbook playbook.yml -i inventory.ini
+ansible-playbook -i inventory.ini install_encrypted_ubuntu_from_rescue.yml
 ```
-
-## Depedencies
-
-- expect (apt)

@@ -1,4 +1,4 @@
-- name: install_encrypted_ubuntu_from_rescue
+- name: Install encrypted ubuntu from rescue
   hosts: myhosts
   gather_facts: false
   vars_prompt:
@@ -14,13 +14,15 @@
   pre_tasks:
     - name: Remove old SSH key for sv1.cservices.co.il
       delegate_to: localhost
-      shell: ssh-keygen -R sv1.cservices.co.il
-      register: ssh_keygen_result
-      changed_when: "'updated' in ssh_keygen_result.stdout"
+      ansible.builtin.known_hosts:
+        path: ~/.ssh/known_hosts
+        name: sv1.cservices.co.il
+        state: absent
+
 
     - name: Accept and store SSH host key permanently
       delegate_to: localhost
-      shell: |
+      ansible.builtin.shell: |
         ssh -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=~/.ssh/known_hosts \
             -p {{ dropbear_port | default(22) }} \
@@ -31,49 +33,53 @@
 
   tasks:
     - name: Gather facts manually after cleanup
-      setup:
-    
+      ansible.builtin.setup:
+
     - name: Stop RAID and wipe disks
-      shell: |
+      ansible.builtin.shell: |
         mdadm --stop /dev/md/* 2>/dev/null || true
         wipefs -fa /dev/nvme*n1
+      register: wipe_result
+      changed_when: wipe_result.stdout is search("were erased")
 
     - name: Upload SSH public key
-      copy:
+      ansible.builtin.copy:
         src: "{{ local_public_key }}"
         dest: /tmp/authorized_keys
         mode: '0644'
 
     - name: Upload setup.conf
-      template:
+      ansible.builtin.template:
         src: setup.conf.j2
         dest: /tmp/setup.conf
         mode: '0644'
 
     - name: Upload post-install script
-      copy:
+      ansible.builtin.copy:
         src: "{{ playbook_dir }}/files/post-install.sh"
         dest: /tmp/post-install.sh
         mode: '0755'
 
     - name: Run installimage
-      shell: |
+      ansible.builtin.shell: |
         export TERM=xterm
         git clone --single-branch --branch security-fix-1 https://github.com/lielmazar/installimage.git
         /root/installimage/installimage -a -c /tmp/setup.conf -x /tmp/post-install.sh
       args:
         chdir: /root
+      changed_when: true
 
-    - name: Manually reboot system
-      shell: reboot
+    - name: Reboot system
+      ansible.builtin.command: reboot
       async: 1
       poll: 0
       ignore_errors: true  # since the SSH connection will drop
       register: reboot_result
+      changed_when: true
 
     - name: Wait for dropbear SSH
       delegate_to: localhost
-      wait_for:
+      ansible.builtin.wait_for:
         host: "{{ inventory_hostname }}"
         port: "{{ dropbear_port }}"
         timeout: 300
@@ -81,7 +87,7 @@
 
     - name: Unlock encrypted disk
       delegate_to: localhost
-      expect:
+      ansible.builtin.expect:
         command: >
           ssh -o StrictHostKeyChecking=no
               -o UserKnownHostsFile=/dev/null
@@ -93,23 +99,24 @@
       failed_when: false   # Dropbear closes the connection after unlocking
       no_log: false        # Prevent logging sensitive information
 
-    - name: Remove old SSH key for sv1.cservices.co.il
+    - name: Remove old SSH key for sv1.cservices.co.il after unlock
+      ansible.builtin.known_hosts:
+        path: ~/.ssh/known_hosts
+        name: sv1.cservices.co.il
+        state: absent
       delegate_to: localhost
-      shell: ssh-keygen -R sv1.cservices.co.il
-      register: ssh_keygen_result
-      changed_when: "'updated' in ssh_keygen_result.stdout"
 
     - name: Wait for SSH
-      wait_for:
+      ansible.builtin.wait_for:
         host: "{{ inventory_hostname }}"
         port: 22
         timeout: 300
         state: started
       delegate_to: localhost
 
-    - name: Accept and store SSH host key permanently
+    - name: Accept and store SSH host key permanently ufter unlock
       delegate_to: localhost
-      shell: |
+      ansible.builtin.shell: |
         ssh -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=~/.ssh/known_hosts \
             -p {{ dropbear_port | default(22) }} \
@@ -119,17 +126,17 @@
       failed_when: false
 
     - name: Upgrade system packages
-      apt:
-        update_cache: yes
+      ansible.builtin.apt:
+        update_cache: true
         upgrade: dist
 
     - name: Install unattended-upgrades
-      apt:
+      ansible.builtin.apt:
         name: unattended-upgrades
         state: present
 
     - name: Remove installimage artifacts
-      file:
+      ansible.builtin.file:
         path: "{{ item }}"
         state: absent
       loop:
