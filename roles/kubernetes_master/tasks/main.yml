@@ -1,0 +1,328 @@
+---
+# tasks file for kubernetes_master
+- name: Install required packages
+  ansible.builtin.apt:
+    name:
+      - curl
+      - gnupg2
+      - software-properties-common
+      - apt-transport-https
+      - ca-certificates
+    state: present
+    update_cache: true
+
+- name: Install Docker
+  ansible.builtin.apt:
+    name: docker.io
+    state: present
+    update_cache: true
+
+- name: Remove Keyrings Directory (if it exists)
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: absent
+
+- name: Remove Existing Kubernetes Repository List (if it exists)
+  ansible.builtin.file:
+    path: /etc/apt/sources.list.d/pkgs_k8s_io_core_stable_v1_30_deb.list
+    state: absent
+
+- name: Disable swap
+  ansible.builtin.command: swapoff -a
+  when: ansible_swaptotal_mb > 0 and ansible_swaptotal_mb is defined
+  changed_when: ansible_swaptotal_mb > 0
+
+- name: Ensure swap is disabled on boot
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    regexp: '^/swap.img\s+none\s+swap\s+sw\s+0\s+0'
+    state: absent
+
+- name: Add kernel modules for Containerd
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/containerd.conf
+    content: |
+      overlay
+      br_netfilter
+    mode: '0644'
+
+- name: Load overlay kernel module
+  community.general.modprobe:
+    name: overlay
+    state: present
+
+- name: Add kernel parameters for Kubernetes
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/kubernetes.conf
+    content: |
+      net.ipv4.ip_forward = 1
+#     net.bridge.bridge-nf-call-ip6tables = 1
+#     net.bridge.bridge-nf-call-iptables = 1
+    mode: '0644'
+
+- name: Apply sysctl parameters for Kubernetes
+  ansible.posix.sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    sysctl_set: true
+    state: present
+    reload: true
+  loop:
+    - { name: 'net.ipv4.ip_forward', value: 1 }
+#   - { name: 'net.bridge.bridge-nf-call-ip6tables', value: 1 }
+#   - { name: 'net.bridge.bridge-nf-call-iptables', value: 1 }
+
+- name: Configuring Containerd (building the configuration file)
+  ansible.builtin.command:
+    cmd: sudo sh -c "containerd config default > /opt/containerd/config.toml"
+
+- name: Configuring Containerd (Setting SystemdCgroup Variable to True)
+  ansible.builtin.command:
+    cmd: sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /opt/containerd/config.toml
+
+- name: Reload systemd configuration
+  ansible.builtin.command:
+    cmd: systemctl daemon-reload
+
+- name: Restart containerd service
+  ansible.builtin.service:
+    name: containerd
+    state: restarted
+
+- name: Allow 6443/tcp through firewall
+  ansible.builtin.command:
+    cmd: sudo ufw allow 6443/tcp
+
+- name: Allow 2379:2380/tcp through firewall
+  ansible.builtin.command:
+    cmd: sudo ufw allow 2379:2380/tcp
+
+- name: Allow 22/tcp through firewall
+  ansible.builtin.command:
+    cmd: sudo ufw allow 22/tcp
+
+- name: Allow 8080/tcp through firewall
+  ansible.builtin.command:
+    cmd: sudo ufw allow 8080/tcp
+
+- name: Allow 10250/tcp through firewall
+  ansible.builtin.command:
+    cmd: sudo ufw allow 10250/tcp
+
+- name: Allow 10251/tcp through firewall
+  ansible.builtin.command:
+    cmd: sudo ufw allow 10251/tcp
+
+- name: Allow 10252/tcp through firewall
+  ansible.builtin.command:
+    cmd: sudo ufw allow 10252/tcp
+
+- name: Allow 10255/tcp through firewall
+  ansible.builtin.command:
+    cmd: sudo ufw allow 10255/tcp
+
+- name: Allow 5473/tcp through firewall
+  ansible.builtin.command:
+    cmd: sudo ufw allow 5473/tcp
+
+- name: Enable the firewall
+  ansible.builtin.ufw:
+    state: enabled
+
+- name: Reload the firewall
+  ansible.builtin.command:
+    cmd: sudo ufw reload
+
+- name: Prepare keyrings directory and update permissions
+  file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+
+- name: Download Kubernetes GPG key securely
+  ansible.builtin.shell: curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.30/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+- name: Add Kubernetes repository
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.30/deb/ /"
+    state: present
+
+- name: Install kubeadm, kubelet, kubectl
+  ansible.builtin.apt:
+    name:
+      - kubelet
+      - kubeadm
+      - kubectl
+    state: present
+    update_cache: yes
+
+- name: Hold kubelet, kubeadm, kubectl packages
+  ansible.builtin.command:
+    cmd: sudo apt-mark hold kubelet kubeadm kubectl
+
+- name: Replace /etc/default/kubelet contents
+  ansible.builtin.copy:
+    dest: /etc/default/kubelet
+    content: 'KUBELET_EXTRA_ARGS="--cgroup-driver=cgroupfs"'
+
+- name: Reload systemd configuration
+  ansible.builtin.command:
+    cmd: systemctl daemon-reload
+
+- name: Restart kubelet service
+  ansible.builtin.service:
+    name: kubelet
+    state: restarted
+
+- name: Update System-Wide Profile for Kubernetes
+  ansible.builtin.copy:
+    dest: /etc/profile.d/kubernetes.sh
+    content: |
+      export KUBECONFIG=/etc/kubernetes/admin.conf
+      export ANSIBLE_USER="sysadmin"
+
+- name: Reboot system
+  ansible.builtin.command: reboot
+  async: 1
+  poll: 0
+  ignore_errors: true  # since the SSH connection will drop
+  register: reboot_result
+  changed_when: true
+
+- name: Remove old SSH key for sv1.cservices.co.il
+  delegate_to: localhost
+  ansible.builtin.known_hosts:
+    path: ~/.ssh/known_hosts
+    name: sv1.cservices.co.il
+    state: absent
+
+- name: Accept and store SSH host key permanently
+  delegate_to: localhost
+  ansible.builtin.shell: |
+    ssh -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=~/.ssh/known_hosts \
+        -p {{ dropbear_port | default(22) }} \
+        root@{{ inventory_hostname }} "echo SSH key accepted"
+  register: ssh_key_accept
+  changed_when: false
+  failed_when: false
+
+- name: Wait for dropbear SSH
+  delegate_to: localhost
+  ansible.builtin.wait_for:
+    host: "sv1.cservices.co.il"
+    port: "{{ dropbear_port }}"
+    timeout: 300
+    state: started
+
+- name: Unlock encrypted disk
+  delegate_to: localhost
+  ansible.builtin.expect:
+    command: >
+      ssh -o StrictHostKeyChecking=no
+          -o UserKnownHostsFile=/dev/null
+          -p {{ dropbear_port }}
+          -tt root@sv1.cservices.co.il cryptroot-unlock
+    responses:
+      '.*unlock.*disk.*:': "{{ luks_passphrase }}"
+  register: unlock_result
+  failed_when: false   # Dropbear closes the connection after unlocking
+  no_log: false        # Prevent logging sensitive information
+  debugger: true
+
+- name: Remove old SSH key for sv1.cservices.co.il after unlock
+  ansible.builtin.known_hosts:
+    path: ~/.ssh/known_hosts
+    name: sv1.cservices.co.il
+    state: absent
+  delegate_to: localhost
+
+- name: Wait for SSH
+  ansible.builtin.wait_for:
+    host: "sv1.cservices.co.il"
+    port: 22
+    timeout: 300
+    state: started
+  delegate_to: localhost
+
+- name: Accept and store SSH host key permanently ufter unlock
+  delegate_to: localhost
+  ansible.builtin.shell: |
+    ssh -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=~/.ssh/known_hosts \
+        -p {{ dropbear_port | default(22) }} \
+        root@sv1.cservices.co.il "echo SSH key accepted"
+  register: ssh_key_accept
+  changed_when: false
+  failed_when: false
+
+- name: Replace Docker daemon.json configuration
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    content: |
+      {
+        "exec-opts": ["native.cgroupdriver=systemd"],
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "100m"
+        },
+        "storage-driver": "overlay2"
+      }
+
+- name: Reload systemd configuration
+  ansible.builtin.command:
+    cmd: systemctl daemon-reload
+
+- name: Restart Docker service
+  ansible.builtin.service:
+    name: docker
+    state: restarted
+
+- name: Update Kubeadm Environment Variable
+  ansible.builtin.command:
+    cmd: sudo sed -i -e '/^\[Service\]/a Environment="KUBELET_EXTRA_ARGS=--fail-swap-on=false"' /usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf
+
+- name: Reload systemd configuration
+  ansible.builtin.command:
+    cmd: systemctl daemon-reload
+
+- name: Restart kubelet service
+  ansible.builtin.service:
+    name: kubelet
+    state: restarted
+
+- name: Pull kubeadm container images
+  ansible.builtin.command:
+    cmd: sudo kubeadm config images pull
+
+- name: Initialize Kubernetes control plane
+  ansible.builtin.command:
+    cmd: kubeadm init --pod-network-cidr=10.244.0.0/16
+    creates: /tmp/kubeadm_output
+  register: kubeadm_init_output
+  become: true
+  changed_when: false
+
+- name: Set permissions for Kubernetes Admin
+  file:
+    path: /etc/kubernetes/admin.conf
+    state: file
+    mode: '0755'
+
+- name: Store Kubernetes initialization output to file
+  copy:
+    content: "{{ kubeadm_init_output.stdout }}"
+    dest: /tmp/kubeadm_output
+  become: true
+  delegate_to: localhost
+
+- name: Generate the Join Command
+  ansible.builtin.shell: cat /tmp/kubeadm_output | tail -n 2 | sed ':a;N;$!ba;s/\\\n\s*/ /g' > /tmp/join-command
+  delegate_to: localhost
+
+- name: Set permissions for the Join Executable
+  file:
+    path: /tmp/join-command
+    state: file
+    mode: '0755'
+  delegate_to: localhost
