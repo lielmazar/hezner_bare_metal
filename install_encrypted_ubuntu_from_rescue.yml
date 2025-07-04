@@ -149,3 +149,4 @@
       loop:
         - /installimage.conf
         - /installimage.debug
+        - /post-install
