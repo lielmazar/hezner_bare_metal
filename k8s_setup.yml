@@ -12,6 +12,8 @@
     dropbear_port: 22
     crio_version: "v1.33"
     k8s_version: "v1.33"
+    nodes_ip: "157.180.11.56"
+    control_plane_dns: "kcp.cservices.co.il"
 
   pre_tasks:
     - name: Remove old SSH key for sv1.cservices.co.il
@@ -37,6 +39,17 @@
     - name: Gather facts manually after cleanup
       ansible.builtin.setup:
 
+    - name: Disable swap at runtime if enabled
+      ansible.builtin.command: swapoff -a
+      when: ansible_swaptotal_mb > 0
+      changed_when: ansible_swaptotal_mb > 0
+
+    - name: Comment out swap entries in /etc/fstab to disable swap permanently
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^(\s*[^#]\S+\s+\S+\s+swap\s+\S.*)$'
+        replace: '# \1'
+
     - name: Enabling IPv4 packet forwarding
       ansible.builtin.copy:
         mode: '0644'
@@ -55,6 +68,7 @@
       loop:
         - { name: 'net.ipv4.ip_forward', value: '1' }
 
+    # Control plane nodes ports and protocols
     - name: Allow 6443/tcp through firewall
       community.general.ufw:
         rule: allow
@@ -79,7 +93,7 @@
         port: 8080
         proto: tcp
 
-    - name: Allow 10250/tcp through firewall
+    - name: Allow 10250/tcp through firewall # Also for control plane node
       community.general.ufw:
         rule: allow
         port: 10250
@@ -108,6 +122,25 @@
         rule: allow
         port: 5473
         proto: tcp
+
+    # Worker nodes ports and protocols
+    - name: Allow 10256/tcp through firewall
+      community.general.ufw:
+        rule: allow
+        port: 10256
+        proto: tcp
+
+    - name: Allow 30000-32767/tcp through firewall
+      community.general.ufw:
+        rule: allow
+        port: 30000:32767
+        proto: tcp
+
+    - name: Allow 30000-32767/udp through firewall
+      community.general.ufw:
+        rule: allow
+        port: 30000:32767
+        proto: udp
 
     - name: Enable the firewall
       community.general.ufw:
@@ -280,3 +313,50 @@
       register: ssh_key_accept
       changed_when: false
       failed_when: false
+
+    - name: Initialize Kubernetes cluster
+      ansible.builtin.command:
+        cmd: "kubeadm init --apiserver-advertise-address={{ nodes_ip }} --control-plane-endpoint={{ control_plane_dns }}"
+        creates: /etc/kubernetes/admin.conf
+
+    - name: Ensure .kube directory exists in user's home
+      ansible.builtin.file:
+        path: "{{ ansible_env.HOME }}/.kube"
+        state: directory
+        mode: '0700'
+        owner: "{{ ansible_user_id }}"
+        group: "{{ ansible_user_gid }}"
+
+    - name: Copy admin.conf to user's kube config
+      ansible.builtin.copy:
+        src: /etc/kubernetes/admin.conf
+        dest: "{{ ansible_env.HOME }}/.kube/config"
+        owner: "{{ ansible_user_id }}"
+        group: "{{ ansible_user_gid }}"
+        mode: '0600'
+        remote_src: true
+
+    - name: Apply Calico operator CRDs
+      ansible.builtin.command: >
+        kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.30.2/manifests/operator-crds.yaml
+      changed_when: false
+
+    - name: Apply Calico Tigera operator
+      ansible.builtin.command: >
+        kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.30.2/manifests/tigera-operator.yaml
+      changed_when: false
+
+    - name: Apply Calico default configuration
+      ansible.builtin.command: >
+        kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.30.2/manifests/custom-resources.yaml
+      changed_when: false
+
+    - name: Untaint control plane nodes to allow scheduling of non-control plane pods
+      ansible.builtin.command: >
+        kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+      changed_when: false
+
+    - name: Label node to exclude them from external load balancers
+      ansible.builtin.command: >
+        kubectl label nodes --all node.kubernetes.io/exclude-from-external-load-balancers-
+      changed_when: false
