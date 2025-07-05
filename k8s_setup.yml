@@ -55,6 +55,64 @@
       loop:
         - { name: 'net.ipv4.ip_forward', value: '1' }
 
+    - name: Allow 6443/tcp through firewall
+      community.general.ufw:
+        rule: allow
+        port: 60000:61000
+        proto: tcp
+
+    - name: Allow 2379:2380/tcp through firewall
+      community.general.ufw:
+        rule: allow
+        port: 2379:2380
+        proto: tcp
+
+    - name: Allow 22/tcp through firewall
+      community.general.ufw:
+        rule: allow
+        port: 22
+        proto: tcp
+
+    - name: Allow 8080/tcp through firewall
+      community.general.ufw:
+        rule: allow
+        port: 8080
+        proto: tcp
+
+    - name: Allow 10250/tcp through firewall
+      community.general.ufw:
+        rule: allow
+        port: 10250
+        proto: tcp
+
+    - name: Allow 10251/tcp through firewall
+      community.general.ufw:
+        rule: allow
+        port: 10251
+        proto: tcp
+
+    - name: Allow 10252/tcp through firewall
+      community.general.ufw:
+        rule: allow
+        port: 10252
+        proto: tcp
+
+    - name: Allow 10255/tcp through firewall
+      community.general.ufw:
+        rule: allow
+        port: 10255
+        proto: tcp
+
+    - name: Allow 5473/tcp through firewall
+      community.general.ufw:
+        rule: allow
+        port: 5473
+        proto: tcp
+
+    - name: Enable the firewall
+      community.general.ufw:
+        state: enabled
+
     - name: Updating apt cache
       ansible.builtin.apt:
         update_cache: true
@@ -98,6 +156,7 @@
       ansible.builtin.apt:
         name: cri-o
         state: present
+        update_cache: true
 
     - name: Ensure CRI-O service is started and enabled
       ansible.builtin.service:
@@ -113,15 +172,15 @@
 
     - name: Convert Kubernetes APT key to GPG format
       ansible.builtin.command:
-        cmd: "gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg"
+        cmd: "gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg /etc/apt/keyrings/kubernetes-apt-keyring.key"
       args:
         creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
 
     - name: Add Kubernetes APT repository
       ansible.builtin.copy:
-        dest: /etc/apt/sources.list.d/cri-o.list
+        dest: /etc/apt/sources.list.d/kubernetes.list
         content: |
-         deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.33/deb/ /
+         deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/{{ k8s_version }}/deb/ /
         mode: '0644'
 
     - name: Install Kubernetes components
@@ -131,17 +190,12 @@
           - kubeadm
           - kubectl
         state: present
+        update_cache: true
 
     - name: Hold Kubernetes packages
       ansible.builtin.command:
-        cmd: "apt-mark hold kubelet kubeadm kubectl"
+        cmd: "apt-mark hold cri-o kubelet kubeadm kubectl"
       args:
         creates: "/var/lib/dpkg/info/kubelet.list"  # crude idempotency — file exists if installed
       register: apt_mark_result
       changed_when: "'hold' in apt_mark_result.stdout or 'hold' in apt_mark_result.stderr"
-
-    # - name: Ensure kubelet service is started and enabled
-    #   ansible.builtin.service:
-    #     name: kubelet
-    #     state: started
-    #     enabled: true
