@@ -199,3 +199,84 @@
         creates: "/var/lib/dpkg/info/kubelet.list"  # crude idempotency — file exists if installed
       register: apt_mark_result
       changed_when: "'hold' in apt_mark_result.stdout or 'hold' in apt_mark_result.stderr"
+
+    - name: Reboot system
+      ansible.builtin.command: reboot
+      async: 1
+      poll: 0
+      ignore_errors: true  # since the SSH connection will drop
+      register: reboot_result
+      changed_when: true
+
+    - name: Remove old SSH key for sv1.cservices.co.il before unlock
+      ansible.builtin.known_hosts:
+        path: ~/.ssh/known_hosts
+        name: sv1.cservices.co.il
+        state: absent
+      delegate_to: localhost
+
+    - name: Wait for dropbear SSH
+      delegate_to: localhost
+      ansible.builtin.wait_for:
+        host: "{{ inventory_hostname }}"
+        port: "{{ dropbear_port }}"
+        timeout: 300
+        state: started
+
+    - name: Accept and store SSH host key permanently before unlock
+      delegate_to: localhost
+      ansible.builtin.shell: |
+        ssh -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            -p {{ dropbear_port | default(22) }} \
+            root@{{ inventory_hostname }} "echo SSH key accepted"
+      register: ssh_key_accept
+      changed_when: false
+      failed_when: false
+
+    - name: Unlock encrypted disk
+      delegate_to: localhost
+      ansible.builtin.expect:
+        command: >
+          ssh -o StrictHostKeyChecking=no
+              -o UserKnownHostsFile=/dev/null
+              -p {{ dropbear_port }}
+              -tt root@{{ inventory_hostname }} cryptroot-unlock
+        responses:
+          '.*unlock.*disk.*:': "{{ luks_passphrase }}"
+      register: unlock_result
+      failed_when: false   # Dropbear closes the connection after unlocking
+      no_log: false        # Prevent logging sensitive information
+
+    - name: Debug unlock result
+      when: unlock_result is defined
+      changed_when: true
+      failed_when: false
+      ansible.builtin.debug:
+        msg: "Unlock result: {{ unlock_result }}"
+
+    - name: Remove old SSH key for sv1.cservices.co.il after unlock
+      ansible.builtin.known_hosts:
+        path: ~/.ssh/known_hosts
+        name: sv1.cservices.co.il
+        state: absent
+      delegate_to: localhost
+
+    - name: Wait for SSH
+      ansible.builtin.wait_for:
+        host: "{{ inventory_hostname }}"
+        port: 22
+        timeout: 300
+        state: started
+      delegate_to: localhost
+
+    - name: Accept and store SSH host key permanently after unlock
+      delegate_to: localhost
+      ansible.builtin.shell: |
+        ssh -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            -p {{ dropbear_port | default(22) }} \
+            root@{{ inventory_hostname }} "echo SSH key accepted"
+      register: ssh_key_accept
+      changed_when: false
+      failed_when: false
