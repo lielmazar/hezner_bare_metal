@@ -7,6 +7,7 @@ This folder contains Ansible configuration for managing the server `sv1.cservice
 - `inventory.ini` defines the target hosts.
 - `install_encrypted_ubuntu_from_rescue.yml` installing encrypted ubuntu 22.04 with hezner's installimage script from rescue.
 - `templates/setup.conf.j2` is a templated version of `setup.conf` used during installation.
+- `k8s_setup.yml` installing and configuring untainted k8s single control plane node with cri-o and calico
 
 ## Usage
 
@@ -33,4 +34,5 @@ pip install -r requirements.txt
 eval $(ssh-agent -s)
 ssh-add ~/.ssh/id_ed25519
 ansible-playbook -i inventory.ini install_encrypted_ubuntu_from_rescue.yml
+ansible-playbook -i inventory.ini k8s_setup.yml 
 ```
