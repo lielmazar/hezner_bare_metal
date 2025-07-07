@@ -316,7 +316,7 @@
 
     - name: Initialize Kubernetes cluster
       ansible.builtin.command:
-        cmd: "kubeadm init --apiserver-advertise-address={{ nodes_ip }} --control-plane-endpoint={{ control_plane_dns }}"
+        cmd: "kubeadm init --pod-network-cidr=10.244.0.0/16 --apiserver-advertise-address={{ nodes_ip }} --control-plane-endpoint={{ control_plane_dns }}"
         creates: /etc/kubernetes/admin.conf
 
     - name: Ensure .kube directory exists in user's home
@@ -336,41 +336,48 @@
         mode: '0600'
         remote_src: true
 
-    - name: Apply Calico operator CRDs
-      ansible.builtin.command: >
-        kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.30.2/manifests/operator-crds.yaml
-      changed_when: false
+    - name: Ensure br_netfilter module is loaded
+      community.general.modprobe:
+        name: br_netfilter
+        state: present
 
-    - name: Apply Calico Tigera operator
-      ansible.builtin.command: >
-        kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.30.2/manifests/tigera-operator.yaml
-      changed_when: false
-
-    - name: Create Calico default IPv4 IPPool
-      ansible.builtin.copy:
-        dest: /tmp/calico-ippool.yaml
-        content: |
-          apiVersion: crd.projectcalico.org/v1
-          kind: IPPool
-          metadata:
-            name: default-ipv4-ippool
-          spec:
-            cidr: 192.168.0.0/16
-            vxlanMode: CrossSubnet
-            natOutgoing: true
-            nodeSelector: all()
+    - name: Ensure br_netfilter module is loaded on boot
+      ansible.builtin.lineinfile:
+        path: /etc/modules-load.d/k8s.conf
+        line: br_netfilter
+        create: true
         mode: '0644'
 
-    - name: Apply Calico IPPool manifest
-      ansible.builtin.command:
-        cmd: kubectl apply -f /tmp/calico-ippool.yaml
-      register: calico_ippool_result
-      changed_when: "'created' in calico_ippool_result.stdout or 'configured' in calico_ippool_result.stdout"
+    - name: Create /opt/cni/bin directory
+      ansible.builtin.file:
+        path: /opt/cni/bin
+        state: directory
+        mode: '0755'
 
-    - name: Apply Calico default configuration
+    - name: Set architecture fact for CNI plugins
+      ansible.builtin.set_fact:
+        cni_arch: >-
+          {{ 'arm' if ansible_architecture == 'armv7l' else
+            'arm64' if ansible_architecture == 'aarch64' else
+            'amd64' }}
+
+    - name: Download CNI plugins archive
+      ansible.builtin.get_url:
+        url: "https://github.com/containernetworking/plugins/releases/download/v1.7.1/cni-plugins-linux-{{ cni_arch }}-v1.7.1.tgz"
+        dest: /tmp/cni-plugins.tgz
+        mode: '0644'
+
+    - name: Extract CNI plugins to /opt/cni/bin
+      ansible.builtin.unarchive:
+        src: /tmp/cni-plugins.tgz
+        dest: /opt/cni/bin
+        remote_src: true
+
+    - name: Apply Flannel manifest
       ansible.builtin.command: >
-        kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.30.2/manifests/custom-resources.yaml
-      changed_when: false
+        kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+      register: flannel_apply
+      changed_when: "'created' in flannel_apply.stdout or 'configured' in flannel_apply.stdout"
 
     - name: Untaint control plane nodes to allow scheduling of non-control plane pods
       ansible.builtin.command: >
