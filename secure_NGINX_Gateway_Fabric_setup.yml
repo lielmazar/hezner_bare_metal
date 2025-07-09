@@ -1,0 +1,232 @@
+- name: Setup cert-manager, Gateway API, and NGINX Gateway Fabric
+  hosts: myhosts
+  tasks:
+    - name: Download Helm GPG key
+      ansible.builtin.get_url:
+        url: https://baltocdn.com/helm/signing.asc
+        dest: /usr/share/keyrings/helm-signing.asc
+        mode: '0644'
+
+    - name: Convert Helm GPG key to dearmored format
+      ansible.builtin.command:
+        cmd: "gpg --dearmor --yes --output /usr/share/keyrings/helm.gpg /usr/share/keyrings/helm-signing.asc"
+        creates: /usr/share/keyrings/helm.gpg
+
+    - name: Add Helm repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/helm-stable-debian.list
+        content: |
+          deb [arch=amd64 signed-by=/usr/share/keyrings/helm.gpg] https://baltocdn.com/helm/stable/debian/ all main
+        mode: '0644'
+
+    - name: Install Helm
+      ansible.builtin.apt:
+        name: helm
+        state: present
+        update_cache: true
+
+    - name: Add Jetstack Helm repository
+      ansible.builtin.command:
+        cmd: "helm repo add jetstack https://charts.jetstack.io"
+        creates: /root/.cache/helm/repository/jetstack-index.yaml
+
+    - name: Update Helm repositories
+      ansible.builtin.command:
+        cmd: "helm repo update"
+      changed_when: false
+
+    - name: Install cert-manager with Gateway API enabled
+      ansible.builtin.command:
+        cmd: >
+          helm install cert-manager jetstack/cert-manager
+          --namespace cert-manager
+          --create-namespace
+          --set config.apiVersion=controller.config.cert-manager.io/v1alpha1
+          --set config.kind=ControllerConfiguration
+          --set config.enableGatewayAPI=true
+          --set crds.enabled=true
+        creates: /etc/kubernetes/cert-manager-installed
+
+    - name: Mark cert-manager as installed
+      ansible.builtin.file:
+        path: /etc/kubernetes/cert-manager-installed
+        state: touch
+        mode: '0644'
+
+    - name: Install Gateway API CRDs
+      ansible.builtin.command:
+        cmd: "kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.3.0/standard-install.yaml"
+        creates: /etc/kubernetes/gateway-api-crds-installed
+
+    - name: Mark Gateway API CRDs as installed
+      ansible.builtin.file:
+        path: /etc/kubernetes/gateway-api-crds-installed
+        state: touch
+        mode: '0644'
+
+    - name: Create nginx-gateway namespace
+      ansible.builtin.command:
+        cmd: "kubectl create namespace nginx-gateway"
+        creates: /var/run/secrets/kubernetes.io/serviceaccount/namespace
+
+    - name: Apply CA issuer and certificate
+      ansible.builtin.command:
+        cmd: >
+          cat <<EOF | kubectl apply -f -
+          apiVersion: cert-manager.io/v1
+          kind: Issuer
+          metadata:
+            name: selfsigned-issuer
+            namespace: nginx-gateway
+          spec:
+            selfSigned: {}
+          ---
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata:
+            name: nginx-gateway-ca
+            namespace: nginx-gateway
+          spec:
+            isCA: true
+            commonName: nginx-gateway
+            secretName: nginx-gateway-ca
+            privateKey:
+              algorithm: RSA
+              size: 2048
+            issuerRef:
+              name: selfsigned-issuer
+              kind: Issuer
+              group: cert-manager.io
+          ---
+          apiVersion: cert-manager.io/v1
+          kind: Issuer
+          metadata:
+            name: nginx-gateway-issuer
+            namespace: nginx-gateway
+          spec:
+            ca:
+              secretName: nginx-gateway-ca
+          EOF
+      changed_when: false
+
+    - name: Create server certificate for nginx gateway
+      ansible.builtin.command:
+        cmd: >
+          bash -c 'cat <<EOF | kubectl apply -f -
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata:
+            name: nginx-gateway
+            namespace: nginx-gateway
+          spec:
+            secretName: server-tls
+            usages:
+              - digital signature
+              - key encipherment
+            dnsNames:
+              - ngf-nginx-gateway-fabric.nginx-gateway.svc
+            issuerRef:
+              name: nginx-gateway-issuer
+          EOF'
+      changed_when: false
+
+    - name: Create agent certificate
+      ansible.builtin.command:
+        cmd: >
+          bash -c 'cat <<EOF | kubectl apply -f -
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata:
+            name: nginx
+            namespace: nginx-gateway
+          spec:
+            secretName: agent-tls
+            usages:
+              - digital signature
+              - key encipherment
+            dnsNames:
+              - "*.cluster.local"
+            issuerRef:
+              name: nginx-gateway-issuer
+          EOF'
+      changed_when: false
+
+    - name: Patch Gateway API CRDs using NGINX Gateway Fabric versions
+      ansible.builtin.command:
+        cmd: "bash -c 'kubectl kustomize \"https://github.com/nginx/nginx-gateway-fabric/config/crd/gateway-api/standard?ref=v2.0.1\" | kubectl apply -f -'"
+      changed_when: false
+
+    - name: Install NGINX Gateway Fabric via Helm OCI
+      ansible.builtin.command:
+        cmd: >
+          helm install ngf oci://ghcr.io/nginx/charts/nginx-gateway-fabric
+          --create-namespace
+          -n nginx-gateway
+      changed_when: false
+
+    - name: Create ClusterIssuer for Let's Encrypt
+      ansible.builtin.command:
+        cmd: >
+          bash -c 'cat <<EOF | kubectl apply -f -
+          apiVersion: cert-manager.io/v1
+          kind: ClusterIssuer
+          metadata:
+            name: letsencrypt-prod
+          spec:
+            acme:
+              email: liel.mazar@gmail.com
+              server: https://acme-v02.api.letsencrypt.org/directory
+              privateKeySecretRef:
+                name: issuer-account-key
+              solvers:
+              - http01:
+                  gatewayHTTPRoute:
+                    parentRefs:
+                    - name: gateway
+                      namespace: default
+                      kind: Gateway
+          EOF'
+      changed_when: false
+
+    - name: Create Gateway resource
+      ansible.builtin.command:
+        cmd: >
+          bash -c 'cat <<EOF | kubectl apply -f -
+          apiVersion: gateway.networking.k8s.io/v1
+          kind: Gateway
+          metadata:
+            name: gateway
+            annotations:
+              cert-manager.io/cluster-issuer: letsencrypt-prod
+          spec:
+            gatewayClassName: nginx
+            listeners:
+            - name: http
+              port: 80
+              protocol: HTTP
+            - name: https
+              hostname: "cafe.cservices.co.il"
+              port: 443
+              protocol: HTTPS
+              tls:
+                mode: Terminate
+                certificateRefs:
+                - kind: Secret
+                  name: cafe-secret
+          EOF'
+      changed_when: false
+
+    - name: Wait for secrets to be created
+      ansible.builtin.command:
+        cmd: "bash -c 'for i in {1..30}; do kubectl get secrets -n nginx-gateway | grep -q agent-tls && break || sleep 5; done'"
+      changed_when: false
+
+    - name: List created secrets
+      ansible.builtin.command:
+        cmd: "kubectl get secrets -n nginx-gateway -o name"
+      register: secrets_output
+      changed_when: false
+
+    - name: Show created secret names
+      ansible.builtin.debug:
+        var: secrets_output.stdout_lines

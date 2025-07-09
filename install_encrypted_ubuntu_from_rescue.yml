@@ -16,9 +16,8 @@
       delegate_to: localhost
       ansible.builtin.known_hosts:
         path: ~/.ssh/known_hosts
-        name: sv1.cservices.co.il
+        name: "{{ inventory_hostname }}"
         state: absent
-
 
     - name: Accept and store SSH host key permanently
       delegate_to: localhost
@@ -109,7 +108,7 @@
     - name: Remove old SSH key for sv1.cservices.co.il after unlock
       ansible.builtin.known_hosts:
         path: ~/.ssh/known_hosts
-        name: sv1.cservices.co.il
+        name: "{{ inventory_hostname }}"
         state: absent
       delegate_to: localhost
 

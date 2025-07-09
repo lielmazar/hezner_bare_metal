@@ -1,18 +1,14 @@
 - name: Kubernetes control plane setup
   hosts: myhosts
-  gather_facts: false
   vars_prompt:
     - name: luks_passphrase
       prompt: "Enter LUKS disk encryption passphrase"
       private: true
 
   vars:
-    local_public_key: "{{ lookup('env','HOME') }}/.ssh/id_ed25519.pub"
-    local_private_key: "{{ lookup('env','HOME') }}/.ssh/id_ed25519"
     dropbear_port: 22
     crio_version: "v1.33"
     k8s_version: "v1.33"
-    nodes_ip: "157.180.11.56"
     control_plane_dns: "kcp.cservices.co.il"
 
   pre_tasks:
@@ -35,9 +31,6 @@
       failed_when: false
 
   tasks:
-    - name: Gather facts manually after cleanup
-      ansible.builtin.setup:
-
     - name: Updating apt cache
       ansible.builtin.apt:
         update_cache: true
@@ -111,6 +104,14 @@
         - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
 
     # Control plane node ports
+    - name: Allow SSH (22/tcp)
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: 22
+        jump: ACCEPT
+        state: present
+
     - name: Allow Kubernetes API server (6443/tcp)
       ansible.builtin.iptables:
         chain: INPUT
@@ -127,22 +128,6 @@
         jump: ACCEPT
         state: present
 
-    - name: Allow SSH (22/tcp)
-      ansible.builtin.iptables:
-        chain: INPUT
-        protocol: tcp
-        destination_port: 22
-        jump: ACCEPT
-        state: present
-
-    - name: Allow 8080/tcp
-      ansible.builtin.iptables:
-        chain: INPUT
-        protocol: tcp
-        destination_port: 8080
-        jump: ACCEPT
-        state: present
-
     - name: Allow kubelet API (10250/tcp)
       ansible.builtin.iptables:
         chain: INPUT
@@ -151,35 +136,19 @@
         jump: ACCEPT
         state: present
 
-    - name: Allow scheduler (10251/tcp)
+    - name: Allow scheduler (10259/tcp)
       ansible.builtin.iptables:
         chain: INPUT
         protocol: tcp
-        destination_port: 10251
+        destination_port: 10259
         jump: ACCEPT
         state: present
 
-    - name: Allow controller manager (10252/tcp)
+    - name: Allow controller manager (10257/tcp)
       ansible.builtin.iptables:
         chain: INPUT
         protocol: tcp
-        destination_port: 10252
-        jump: ACCEPT
-        state: present
-
-    - name: Allow 10255/tcp
-      ansible.builtin.iptables:
-        chain: INPUT
-        protocol: tcp
-        destination_port: 10255
-        jump: ACCEPT
-        state: present
-
-    - name: Allow metrics-server (5473/tcp)
-      ansible.builtin.iptables:
-        chain: INPUT
-        protocol: tcp
-        destination_port: 5473
+        destination_port: 10257
         jump: ACCEPT
         state: present
 
@@ -207,8 +176,40 @@
         jump: ACCEPT
         state: present
 
+    - name: Allow layer 2 metalLB requirement (7946/tcp)
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: 7946
+        jump: ACCEPT
+        state: present
+
+    - name: Allow layer 2 metalLB requirement (7946/udp)
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: udp
+        destination_port: 7946
+        jump: ACCEPT
+        state: present
+
     # Worker node ports
-    - name: Allow 10256/tcp
+    - name: Allow 80/tcp
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: 80
+        jump: ACCEPT
+        state: present
+
+    - name: Allow 443/tcp
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: 443
+        jump: ACCEPT
+        state: present
+
+    - name: Allow kube-proxy (10256/tcp)
       ansible.builtin.iptables:
         chain: INPUT
         protocol: tcp
@@ -216,7 +217,7 @@
         jump: ACCEPT
         state: present
 
-    - name: Allow NodePort TCP
+    - name: Allow NodePort TCP (30000-32767/tcp)
       ansible.builtin.iptables:
         chain: INPUT
         protocol: tcp
@@ -224,7 +225,7 @@
         jump: ACCEPT
         state: present
 
-    - name: Allow NodePort UDP
+    - name: Allow NodePort UDP (30000-32767/udp)
       ansible.builtin.iptables:
         chain: INPUT
         protocol: udp
@@ -407,7 +408,7 @@
     - name: Remove old SSH key for sv1.cservices.co.il after unlock
       ansible.builtin.known_hosts:
         path: ~/.ssh/known_hosts
-        name: sv1.cservices.co.il
+        name: "{{ inventory_hostname }}"
         state: absent
       delegate_to: localhost
 
@@ -432,14 +433,18 @@
 
     - name: Initialize Kubernetes cluster
       ansible.builtin.command:
-        cmd: "kubeadm init --pod-network-cidr=10.244.0.0/16 --apiserver-advertise-address={{ nodes_ip }} --control-plane-endpoint={{ control_plane_dns }}"
+        cmd: >
+          kubeadm init
+          --pod-network-cidr=10.244.0.0/16
+          --apiserver-advertise-address={{ inventory_hostname }}
+          --control-plane-endpoint={{ control_plane_dns }}
         creates: /etc/kubernetes/admin.conf
 
     - name: Ensure .kube directory exists in user's home
       ansible.builtin.file:
         path: "{{ ansible_env.HOME }}/.kube"
         state: directory
-        mode: '0700'
+        mode: '0644'
         owner: "{{ ansible_user_id }}"
         group: "{{ ansible_user_gid }}"
 
@@ -449,14 +454,14 @@
         dest: "{{ ansible_env.HOME }}/.kube/config"
         owner: "{{ ansible_user_id }}"
         group: "{{ ansible_user_gid }}"
-        mode: '0600'
+        mode: '0644'
         remote_src: true
 
     - name: Create /opt/cni/bin directory
       ansible.builtin.file:
         path: /opt/cni/bin
         state: directory
-        mode: '0755'
+        mode: '0644'
 
     - name: Set architecture fact for CNI plugins
       ansible.builtin.set_fact:
