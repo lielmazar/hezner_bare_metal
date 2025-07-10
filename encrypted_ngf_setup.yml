@@ -1,0 +1,235 @@
+- name: Bootstrap MetalLB + Gateway API + cert-manager + NGINX Gateway Fabric
+  hosts: myhosts        # ← your control-plane host / group
+
+  vars:
+    metallb_version: v0.15.2
+    ipaddress_pool_v4: 65.108.21.139/32         # public IPv4 assigned to server
+    gateway_api_version: v1.3.0
+    cert_manager_release: cert-manager
+    cert_manager_namespace: cert-manager
+    cert_manager_email: liel.mazar@gmail.com
+    ngf_chart_ref: oci://ghcr.io/nginx/charts/nginx-gateway-fabric
+    ngf_chart_version: 2.0.2
+    ngf_namespace: nginx-gateway
+    domain: cafe.cservices.co.il          # hostname you’ll serve
+    gateway_name: gateway                 # Gateway resource name
+
+  tasks:
+    - name: Ensure curl, gpg and apt-transport-https are present
+      ansible.builtin.apt:
+        name: [curl, gpg, apt-transport-https]
+        state: present
+        update_cache: true
+
+    - name: Download Helm APT key
+      ansible.builtin.get_url:
+        url: "https://baltocdn.com/helm/signing.asc"
+        dest: /usr/share/keyrings/Helm.asc
+        mode: '0644'
+
+    - name: Convert Helm APT key to GPG format
+      ansible.builtin.command:
+        cmd: "gpg --dearmor -o /usr/share/keyrings/helm.gpg /usr/share/keyrings/Helm.asc"
+      args:
+        creates: /usr/share/keyrings/helm.gpg
+
+    - name: Add Helm APT repository
+      ansible.builtin.apt_repository:
+        repo: "deb [arch={{ ansible_architecture }} signed-by=/usr/share/keyrings/helm.gpg] \
+              https://baltocdn.com/helm/stable/debian/ all main"
+        filename: helm-stable-debian
+        state: present
+        update_cache: true
+
+    - name: Install Helm
+      ansible.builtin.apt:
+        name: helm
+        state: present
+
+    - name: Check if MetalLB already present
+      ansible.builtin.command: kubectl get ns metallb-system -o name
+      register: metallb_ns
+      changed_when: false
+      failed_when: metallb_ns.rc not in [0, 1]
+
+    - name: Deploy MetalLB native manifest
+      ansible.builtin.shell: |
+        kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/{{ metallb_version }}/config/manifests/metallb-native.yaml
+      when: metallb_ns.rc != 0
+      register: result
+      changed_when: "'configured' in result.stdout or 'created' in result.stdout"
+
+    - name: Configure MetalLB IP pool + L2Advertisement
+      ansible.builtin.shell: |
+        set -o pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: metallb.io/v1beta1
+        kind: IPAddressPool
+        metadata:
+          name: public-vips
+          namespace: metallb-system
+        spec:
+          addresses:
+          - {{ ipaddress_pool_v4 }}
+        ---
+        apiVersion: metallb.io/v1beta1
+        kind: L2Advertisement
+        metadata:
+          name: l2adv
+          namespace: metallb-system
+        EOF
+      args: {warn: false, executable: /bin/bash}
+      register: result
+      changed_when: "'configured' in result.stdout or 'created' in result.stdout"
+
+    - name: Apply NGF Gateway-API CRDs
+      ansible.builtin.shell: |
+        set -o pipefail
+        kubectl kustomize \
+          "https://github.com/nginx/nginx-gateway-fabric/config/crd/gateway-api/standard?ref={{ ngf_chart_version }}" \
+          | kubectl apply -f -
+      args: {warn: false, executable: /bin/bash}
+      register: result
+      changed_when: "'configured' in result.stdout or 'created' in result.stdout"
+
+    - name: Install cert-manager via Helm
+      ansible.builtin.shell: |
+        set -o pipefail
+        helm repo add jetstack https://charts.jetstack.io
+        helm repo update
+        helm install \
+          cert-manager jetstack/cert-manager \
+          --namespace cert-manager \
+          --create-namespace \
+          --set config.apiVersion="controller.config.cert-manager.io/v1alpha1" \
+          --set config.kind="ControllerConfiguration" \
+          --set config.enableGatewayAPI=true \
+          --set crds.enabled=true
+      args: {warn: false, executable: /bin/bash}
+      register: cm_install
+      changed_when: "'STATUS: deployed' in cm_install.stdout or 'installed' in cm_install.stdout"
+
+    - name: Ensure ngf_namespace namespace exists
+      ansible.builtin.command: kubectl create namespace {{ ngf_namespace }}
+      register: ns_create
+      changed_when: ns_create.rc == 0
+      failed_when: ns_create.rc not in [0, 1]
+
+    - name: Bootstrap internal CA and issuers for NGF
+      ansible.builtin.shell: |
+        set -o pipefail
+          cat <<EOF | kubectl apply -f -
+          apiVersion: cert-manager.io/v1
+          kind: Issuer
+          metadata: {name: selfsigned-issuer, namespace: {{ ngf_namespace }}}
+          spec: {selfSigned: {}}
+          ---
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata: {name: nginx-gateway-ca, namespace: {{ ngf_namespace }}}
+          spec:
+            isCA: true
+            commonName: nginx-gateway
+            secretName: nginx-gateway-ca
+            privateKey: {algorithm: RSA, size: 2048}
+            issuerRef: {name: selfsigned-issuer, kind: Issuer, group: cert-manager.io}
+          ---
+          apiVersion: cert-manager.io/v1
+          kind: Issuer
+          metadata: {name: nginx-gateway-issuer, namespace: {{ ngf_namespace }}}
+          spec: {ca: {secretName: nginx-gateway-ca}}
+          ---
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata: {name: nginx-gateway, namespace: {{ ngf_namespace }}}
+          spec:
+            secretName: server-tls
+            usages: ["digital signature", "key encipherment"]
+            dnsNames: [ngf-nginx-gateway-fabric.{{ ngf_namespace }}.svc]
+            issuerRef: {name: nginx-gateway-issuer}
+          ---
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          metadata:
+            name: nginx
+            namespace: nginx-gateway
+          spec:
+            secretName: agent-tls
+            usages:
+            - "digital signature"
+            - "key encipherment"
+            dnsNames:
+            - "*.cluster.local"
+            issuerRef:
+              name: nginx-gateway-issuer
+          EOF
+      args: {warn: false, executable: /bin/bash}
+      register: ngf_ca
+      changed_when: "'created' in ngf_ca.stdout"
+
+    - name: Install NGF via Helm
+      ansible.builtin.shell: |
+        helm install \
+          ngf oci://ghcr.io/nginx/charts/nginx-gateway-fabric \
+          --create-namespace -n nginx-gateway
+      args: {warn: false}
+      register: ngf_install
+      changed_when: "'STATUS: deployed' in ngf_install.stdout or 'installed' in ngf_install.stdout"
+
+    - name: Wait for NGF deployment readiness
+      ansible.builtin.command: >
+        kubectl wait -n {{ ngf_namespace }}
+        --for=condition=Available deployment/ngf-nginx-gateway-fabric
+        --timeout=300s
+      changed_when: false
+
+    - name: Create Let’s Encrypt ClusterIssuer (HTTP-01 via NGF)
+      ansible.builtin.shell: |
+        set -o pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: cert-manager.io/v1
+        kind: ClusterIssuer
+        metadata: {name: letsencrypt-prod}
+        spec:
+          acme:
+            email: {{ cert_manager_email }}
+            server: https://acme-v02.api.letsencrypt.org/directory
+            privateKeySecretRef: {name: issuer-account-key}
+            solvers:
+            - http01:
+                gatewayHTTPRoute:
+                  parentRefs:
+                  - {name: {{ gateway_name }}, namespace: default, kind: Gateway}
+        EOF
+      args: {warn: false, executable: /bin/bash}
+      register: le_issuer
+      changed_when: "'created' in le_issuer.stdout"
+
+    - name: Deploy Gateway resource (TLS terminated by cert-manager)
+      ansible.builtin.shell: |
+        set -o pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: gateway.networking.k8s.io/v1
+        kind: Gateway
+        metadata:
+          name: {{ gateway_name }}
+          namespace: default
+          annotations: {cert-manager.io/cluster-issuer: letsencrypt-prod}
+        spec:
+          gatewayClassName: nginx
+          listeners:
+          - name: http
+            port: 80
+            protocol: HTTP
+          - name: https
+            hostname: "{{ domain }}"
+            port: 443
+            protocol: HTTPS
+            tls:
+              mode: Terminate
+              certificateRefs:
+              - {kind: Secret, name: cafe-secret}
+        EOF
+      args: {warn: false, executable: /bin/bash}
+      register: gw_apply
+      changed_when: "'created' in gw_apply.stdout"

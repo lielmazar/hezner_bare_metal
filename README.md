@@ -33,6 +33,7 @@ pip install -r requirements.txt
 ```bash
 eval $(ssh-agent -s)
 ssh-add ~/.ssh/id_ed25519
-ansible-playbook -i inventory.ini install_encrypted_ubuntu_from_rescue.yml
+ansible-playbook -i inventory.ini encrypted_ubuntu_setup.yml
 ansible-playbook -i inventory.ini k8s_setup.yml 
+ansible-playbook -i inventory.ini encrypted_ngf_setup.yml
 ```
