@@ -6,8 +6,8 @@ This folder contains Ansible configuration for managing the server `sv1.cservice
 
 - `inventory.ini` defines the target hosts.
 - `encrypted_ubuntu_setup.yml` installing encrypted ubuntu 22.04 with hezner's installimage script from rescue.
-- `k8s_setup.yml` installing and configuring untainted k8s single control plane node with cri-o and flunnel.
-- `encrypted_ngf_setup.yml` installing metalLb, cert-manger and nginx gateway fabric and deploys let's encrypt signed tls loadbalanced (failover ip) gateway
+- `k8s_setup.yml` installing and configuring untainted k8s single control plane node with cri-o and Flannel.
+- `encrypted_ngf_setup.yml` installing MetalLB, cert-manager and nginx gateway fabric and deploys let's encrypt signed tls loadbalanced (failover ip) gateway
 
 ## Usage
 
