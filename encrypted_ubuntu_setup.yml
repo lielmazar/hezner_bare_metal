@@ -1,6 +1,7 @@
 - name: Install encrypted ubuntu from rescue
   hosts: myhosts
   gather_facts: false
+
   vars_prompt:
     - name: luks_passphrase
       prompt: "Enter LUKS disk encryption passphrase"
@@ -16,9 +17,8 @@
       delegate_to: localhost
       ansible.builtin.known_hosts:
         path: ~/.ssh/known_hosts
-        name: sv1.cservices.co.il
+        name: "{{ inventory_hostname }}"
         state: absent
-
 
     - name: Accept and store SSH host key permanently
       delegate_to: localhost
@@ -99,10 +99,17 @@
       failed_when: false   # Dropbear closes the connection after unlocking
       no_log: false        # Prevent logging sensitive information
 
+    - name: Debug unlock result
+      when: unlock_result is defined
+      changed_when: true
+      failed_when: false
+      ansible.builtin.debug:
+        msg: "Unlock result: {{ unlock_result }}"
+
     - name: Remove old SSH key for sv1.cservices.co.il after unlock
       ansible.builtin.known_hosts:
         path: ~/.ssh/known_hosts
-        name: sv1.cservices.co.il
+        name: "{{ inventory_hostname }}"
         state: absent
       delegate_to: localhost
 
@@ -142,3 +149,4 @@
       loop:
         - /installimage.conf
         - /installimage.debug
+        - /post-install

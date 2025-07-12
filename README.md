@@ -5,8 +5,9 @@ This folder contains Ansible configuration for managing the server `sv1.cservice
 ## Files
 
 - `inventory.ini` defines the target hosts.
-- `install_encrypted_ubuntu_from_rescue.yml` installing encrypted ubuntu 22.04 with hezner's installimage script from rescue.
-- `templates/setup.conf.j2` is a templated version of `setup.conf` used during installation.
+- `encrypted_ubuntu_setup.yml` installing encrypted ubuntu 22.04 with hezner's installimage script from rescue.
+- `k8s_setup.yml` installing and configuring untainted k8s single control plane node with cri-o and Flannel.
+- `encrypted_ngf_setup.yml` installing MetalLB, cert-manager and nginx gateway fabric and deploys let's encrypt signed tls loadbalanced (failover ip) gateway
 
 ## Usage
 
@@ -27,10 +28,12 @@ Install project dependencies
 pip install -r requirements.txt
 ```
 
-### Run the playbook from this directory with:
+### Run the playbooks from this directory with:
 
 ```bash
 eval $(ssh-agent -s)
 ssh-add ~/.ssh/id_ed25519
-ansible-playbook -i inventory.ini install_encrypted_ubuntu_from_rescue.yml
+ansible-playbook -i inventory.ini encrypted_ubuntu_setup.yml
+ansible-playbook -i inventory.ini k8s_setup.yml 
+ansible-playbook -i inventory.ini encrypted_ngf_setup.yml
 ```

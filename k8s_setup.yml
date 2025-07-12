@@ -1,0 +1,500 @@
+- name: Kubernetes control plane setup
+
+  hosts: myhosts
+  vars_prompt:
+    - name: luks_passphrase
+      prompt: "Enter LUKS disk encryption passphrase"
+      private: true
+
+  vars:
+    dropbear_port: 22
+    crio_version: "v1.33"
+    k8s_version: "v1.33"
+    control_plane_dns: "kcp.cservices.co.il"
+
+  pre_tasks:
+    - name: Remove old SSH key for sv1.cservices.co.il
+      delegate_to: localhost
+      ansible.builtin.known_hosts:
+        path: ~/.ssh/known_hosts
+        name: sv1.cservices.co.il
+        state: absent
+
+    - name: Accept and store SSH host key permanently
+      delegate_to: localhost
+      ansible.builtin.shell: |
+        ssh -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            -p {{ dropbear_port | default(22) }} \
+            root@{{ inventory_hostname }} "echo SSH key accepted"
+      register: ssh_key_accept
+      changed_when: false
+      failed_when: false
+
+  tasks:
+    - name: Updating apt cache
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: Install dependencies
+      ansible.builtin.apt:
+        name:
+          - software-properties-common
+          - curl
+          - apt-transport-https
+          - ca-certificates
+          - gpg
+          - iptables-persistent
+        state: present
+
+    - name: Disable swap at runtime if enabled
+      ansible.builtin.command: swapoff -a
+      when: ansible_swaptotal_mb > 0
+      changed_when: ansible_swaptotal_mb > 0
+
+    - name: Comment out swap entries in /etc/fstab to disable swap permanently
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^(\s*[^#]\S+\s+\S+\s+swap\s+\S.*)$'
+        replace: '# \1'
+
+    - name: Ensure required kernel modules are loaded
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+        - vxlan
+
+    - name: Ensure required modules load at boot
+      ansible.builtin.lineinfile:
+        path: /etc/modules-load.d/k8s.conf
+        line: "{{ item }}"
+        create: true
+        mode: '0644'
+      loop:
+        - overlay
+        - br_netfilter
+        - vxlan
+
+    - name: Force iptables to use legacy backend
+      ansible.builtin.shell: |
+        update-alternatives --set iptables /usr/sbin/iptables-legacy
+        update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+      changed_when: true
+
+    - name: Enabling IPv4 packet forwarding and ip bridges
+      ansible.builtin.copy:
+        mode: '0644'
+        dest: /etc/sysctl.d/99-k8s.conf
+        content: |
+          net.ipv4.ip_forward = 1
+          net.bridge.bridge-nf-call-iptables = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+
+    - name: Set Kubernetes networking sysctl params
+      ansible.posix.sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: true
+      loop:
+        - { name: 'net.ipv4.ip_forward', value: '1' }
+        - { name: 'net.bridge.bridge-nf-call-iptables', value: '1' }
+        - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
+
+    # Control plane node ports
+    - name: Allow SSH (22/tcp)
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: 22
+        jump: ACCEPT
+        state: present
+
+    - name: Allow Kubernetes API server (6443/tcp)
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: 6443
+        jump: ACCEPT
+        state: present
+
+    - name: Allow etcd (2379-2380/tcp)
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: 2379:2380
+        jump: ACCEPT
+        state: present
+
+    - name: Allow kubelet API (10250/tcp)
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: 10250
+        jump: ACCEPT
+        state: present
+
+    - name: Allow scheduler (10259/tcp)
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: 10259
+        jump: ACCEPT
+        state: present
+
+    - name: Allow controller manager (10257/tcp)
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: 10257
+        jump: ACCEPT
+        state: present
+
+    - name: Allow Flannel VXLAN (8472/udp)
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: udp
+        destination_port: 8472
+        jump: ACCEPT
+        state: present
+
+    - name: Allow DNS (53/tcp)
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: 53
+        jump: ACCEPT
+        state: present
+
+    - name: Allow DNS (53/udp)
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: udp
+        destination_port: 53
+        jump: ACCEPT
+        state: present
+
+    - name: Allow layer 2 metalLB requirement (7946/tcp)
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: 7946
+        jump: ACCEPT
+        state: present
+
+    - name: Allow layer 2 metalLB requirement (7946/udp)
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: udp
+        destination_port: 7946
+        jump: ACCEPT
+        state: present
+
+    # Worker node ports
+    - name: Allow 80/tcp
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: 80
+        jump: ACCEPT
+        state: present
+
+    - name: Allow 443/tcp
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: 443
+        jump: ACCEPT
+        state: present
+
+    - name: Allow kube-proxy (10256/tcp)
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: 10256
+        jump: ACCEPT
+        state: present
+
+    - name: Allow NodePort TCP (30000-32767/tcp)
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: 30000:32767
+        jump: ACCEPT
+        state: present
+
+    - name: Allow NodePort UDP (30000-32767/udp)
+      ansible.builtin.iptables:
+        chain: INPUT
+        protocol: udp
+        destination_port: 30000:32767
+        jump: ACCEPT
+        state: present
+
+    # Good practices
+    - name: Allow established and related connections
+      ansible.builtin.iptables:
+        chain: INPUT
+        ctstate: ESTABLISHED,RELATED
+        jump: ACCEPT
+        state: present
+
+    - name: Allow loopback traffic
+      ansible.builtin.iptables:
+        chain: INPUT
+        in_interface: lo
+        jump: ACCEPT
+        state: present
+
+    - name: Set default INPUT policy to DROP
+      ansible.builtin.iptables:
+        chain: INPUT
+        policy: DROP
+
+    - name: Set default OUTPUT policy to ACCEPT
+      ansible.builtin.iptables:
+        chain: OUTPUT
+        policy: ACCEPT
+
+    - name: Save iptables rules to temp file
+      ansible.builtin.command: iptables-save
+      register: iptables_save
+      changed_when: false
+
+    - name: Ensure /etc/iptables directory exists
+      ansible.builtin.file:
+        path: /etc/iptables
+        state: directory
+        mode: '0755'
+
+    - name: Write iptables rules if changed
+      ansible.builtin.copy:
+        content: "{{ iptables_save.stdout }}"
+        dest: /etc/iptables/rules.v4
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Ensure /etc/apt/keyrings exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Download CRI-O APT key
+      ansible.builtin.get_url:
+        url: "https://download.opensuse.org/repositories/isv:/cri-o:/stable:/{{ crio_version }}/deb/Release.key"
+        dest: /etc/apt/keyrings/cri-o-release.key
+        mode: '0644'
+
+    - name: Convert CRI-O APT key to GPG format
+      ansible.builtin.command:
+        cmd: "gpg --dearmor -o /etc/apt/keyrings/cri-o-apt-keyring.gpg /etc/apt/keyrings/cri-o-release.key"
+      args:
+        creates: /etc/apt/keyrings/cri-o-apt-keyring.gpg
+
+    - name: Add CRI-O APT repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/cri-o.list
+        content: |
+          deb [signed-by=/etc/apt/keyrings/cri-o-apt-keyring.gpg] https://download.opensuse.org/repositories/isv:/cri-o:/stable:/{{ crio_version }}/deb/ /
+        mode: '0644'
+
+    - name: Install CRI-O
+      ansible.builtin.apt:
+        name: cri-o
+        state: present
+        update_cache: true
+
+    - name: Ensure CRI-O service is started and enabled
+      ansible.builtin.service:
+        name: crio
+        state: started
+        enabled: true
+
+    - name: Download Kubernetes APT key
+      ansible.builtin.get_url:
+        url: "https://pkgs.k8s.io/core:/stable:/{{ k8s_version }}/deb/Release.key"
+        dest: /etc/apt/keyrings/kubernetes-apt-keyring.key
+        mode: '0644'
+
+    - name: Convert Kubernetes APT key to GPG format
+      ansible.builtin.command:
+        cmd: "gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg /etc/apt/keyrings/kubernetes-apt-keyring.key"
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    - name: Add Kubernetes APT repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: |
+         deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/{{ k8s_version }}/deb/ /
+        mode: '0644'
+
+    - name: Install Kubernetes components
+      ansible.builtin.apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+        update_cache: true
+
+    - name: Hold Kubernetes packages
+      ansible.builtin.command:
+        cmd: "apt-mark hold cri-o kubelet kubeadm kubectl"
+      args:
+        creates: "/var/lib/dpkg/info/kubelet.list"  # crude idempotency — file exists if installed
+      register: apt_mark_result
+      changed_when: "'hold' in apt_mark_result.stdout or 'hold' in apt_mark_result.stderr"
+
+    - name: Reboot system
+      ansible.builtin.command: reboot
+      async: 1
+      poll: 0
+      ignore_errors: true  # since the SSH connection will drop
+      register: reboot_result
+      changed_when: true
+
+    - name: Remove old SSH key for sv1.cservices.co.il before unlock
+      ansible.builtin.known_hosts:
+        path: ~/.ssh/known_hosts
+        name: sv1.cservices.co.il
+        state: absent
+      delegate_to: localhost
+
+    - name: Wait for dropbear SSH
+      delegate_to: localhost
+      ansible.builtin.wait_for:
+        host: "{{ inventory_hostname }}"
+        port: "{{ dropbear_port }}"
+        timeout: 300
+        state: started
+
+    - name: Accept and store SSH host key permanently before unlock
+      delegate_to: localhost
+      ansible.builtin.shell: |
+        ssh -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            -p {{ dropbear_port | default(22) }} \
+            root@{{ inventory_hostname }} "echo SSH key accepted"
+      register: ssh_key_accept
+      changed_when: false
+      failed_when: false
+
+    - name: Unlock encrypted disk
+      delegate_to: localhost
+      ansible.builtin.expect:
+        command: >
+          ssh -o StrictHostKeyChecking=no
+              -o UserKnownHostsFile=/dev/null
+              -p {{ dropbear_port }}
+              -tt root@{{ inventory_hostname }} cryptroot-unlock
+        responses:
+          '.*unlock.*disk.*:': "{{ luks_passphrase }}"
+      register: unlock_result
+      failed_when: false   # Dropbear closes the connection after unlocking
+      no_log: false        # Prevent logging sensitive information
+
+    - name: Debug unlock result
+      when: unlock_result is defined
+      changed_when: true
+      failed_when: false
+      ansible.builtin.debug:
+        msg: "Unlock result: {{ unlock_result }}"
+
+    - name: Remove old SSH key for sv1.cservices.co.il after unlock
+      ansible.builtin.known_hosts:
+        path: ~/.ssh/known_hosts
+        name: "{{ inventory_hostname }}"
+        state: absent
+      delegate_to: localhost
+
+    - name: Wait for SSH
+      ansible.builtin.wait_for:
+        host: "{{ inventory_hostname }}"
+        port: 22
+        timeout: 300
+        state: started
+      delegate_to: localhost
+
+    - name: Accept and store SSH host key permanently after unlock
+      delegate_to: localhost
+      ansible.builtin.shell: |
+        ssh -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            -p {{ dropbear_port | default(22) }} \
+            root@{{ inventory_hostname }} "echo SSH key accepted"
+      register: ssh_key_accept
+      changed_when: false
+      failed_when: false
+
+    - name: Initialize Kubernetes cluster
+      ansible.builtin.command:
+        cmd: >
+          kubeadm init
+          --pod-network-cidr=10.244.0.0/16
+          --apiserver-advertise-address={{ inventory_hostname }}
+          --control-plane-endpoint={{ control_plane_dns }}
+        creates: /etc/kubernetes/admin.conf
+
+    - name: Ensure .kube directory exists in user's home
+      ansible.builtin.file:
+        path: "{{ ansible_env.HOME }}/.kube"
+        state: directory
+        mode: '0644'
+        owner: "{{ ansible_user_id }}"
+        group: "{{ ansible_user_gid }}"
+
+    - name: Copy admin.conf to user's kube config
+      ansible.builtin.copy:
+        src: /etc/kubernetes/admin.conf
+        dest: "{{ ansible_env.HOME }}/.kube/config"
+        owner: "{{ ansible_user_id }}"
+        group: "{{ ansible_user_gid }}"
+        mode: '0644'
+        remote_src: true
+
+    - name: Create /opt/cni/bin directory
+      ansible.builtin.file:
+        path: /opt/cni/bin
+        state: directory
+        mode: '0644'
+
+    - name: Set architecture fact for CNI plugins
+      ansible.builtin.set_fact:
+        cni_arch: >-
+          {{ 'arm' if ansible_architecture == 'armv7l' else
+            'arm64' if ansible_architecture == 'aarch64' else
+            'amd64' }}
+
+    - name: Download CNI plugins archive
+      ansible.builtin.get_url:
+        url: "https://github.com/containernetworking/plugins/releases/download/v1.7.1/cni-plugins-linux-{{ cni_arch }}-v1.7.1.tgz"
+        dest: /tmp/cni-plugins.tgz
+        mode: '0644'
+
+    - name: Extract CNI plugins to /opt/cni/bin
+      ansible.builtin.unarchive:
+        src: /tmp/cni-plugins.tgz
+        dest: /opt/cni/bin
+        remote_src: true
+
+    - name: Apply Flannel manifest
+      ansible.builtin.command: >
+        kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+      register: flannel_apply
+      changed_when: "'created' in flannel_apply.stdout or 'configured' in flannel_apply.stdout"
+
+    - name: Untaint control plane nodes to allow scheduling of non-control plane pods
+      ansible.builtin.command: >
+        kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+      changed_when: false
+
+    - name: Label node to exclude them from external load balancers
+      ansible.builtin.command: >
+        kubectl label nodes --all node.kubernetes.io/exclude-from-external-load-balancers-
+      changed_when: false
