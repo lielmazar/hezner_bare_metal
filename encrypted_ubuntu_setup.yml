@@ -1,6 +1,7 @@
 - name: Install encrypted ubuntu from rescue
   hosts: myhosts
   gather_facts: false
+
   vars_prompt:
     - name: luks_passphrase
       prompt: "Enter LUKS disk encryption passphrase"

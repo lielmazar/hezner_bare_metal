@@ -9,7 +9,7 @@
     cert_manager_namespace: cert-manager
     cert_manager_email: liel.mazar@gmail.com
     ngf_chart_ref: oci://ghcr.io/nginx/charts/nginx-gateway-fabric
-    ngf_chart_version: 2.0.2
+    ngf_chart_version: v2.0.2
     ngf_namespace: nginx-gateway
     domain: cafe.cservices.co.il          # hostname you’ll serve
     gateway_name: gateway                 # Gateway resource name
@@ -21,30 +21,17 @@
         state: present
         update_cache: true
 
-    - name: Download Helm APT key
-      ansible.builtin.get_url:
-        url: "https://baltocdn.com/helm/signing.asc"
-        dest: /usr/share/keyrings/Helm.asc
-        mode: '0644'
-
-    - name: Convert Helm APT key to GPG format
-      ansible.builtin.command:
-        cmd: "gpg --dearmor -o /usr/share/keyrings/helm.gpg /usr/share/keyrings/Helm.asc"
-      args:
-        creates: /usr/share/keyrings/helm.gpg
-
-    - name: Add Helm APT repository
-      ansible.builtin.apt_repository:
-        repo: "deb [arch={{ ansible_architecture }} signed-by=/usr/share/keyrings/helm.gpg] \
-              https://baltocdn.com/helm/stable/debian/ all main"
-        filename: helm-stable-debian
-        state: present
-        update_cache: true
-
     - name: Install Helm
-      ansible.builtin.apt:
-        name: helm
-        state: present
+      ansible.builtin.shell: |
+        set -o pipefail
+        curl https://baltocdn.com/helm/signing.asc | gpg --dearmor | sudo tee /usr/share/keyrings/helm.gpg > /dev/null
+        sudo apt-get install apt-transport-https --yes
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/helm.gpg] https://baltocdn.com/helm/stable/debian/ all main" | \
+        sudo tee /etc/apt/sources.list.d/helm-stable-debian.list
+        sudo apt-get update
+        sudo apt-get install helm
+      args: {executable: /bin/bash}
+      changed_when: true
 
     - name: Check if MetalLB already present
       ansible.builtin.command: kubectl get ns metallb-system -o name
@@ -58,6 +45,12 @@
       when: metallb_ns.rc != 0
       register: result
       changed_when: "'configured' in result.stdout or 'created' in result.stdout"
+
+    - name: Wait until all MetalLB pods are Ready
+      ansible.builtin.command: >
+        kubectl -n metallb-system
+        wait --for=condition=Ready pod --all --timeout=300s
+      changed_when: false
 
     - name: Configure MetalLB IP pool + L2Advertisement
       ansible.builtin.shell: |
@@ -78,7 +71,7 @@
           name: l2adv
           namespace: metallb-system
         EOF
-      args: {warn: false, executable: /bin/bash}
+      args: {executable: /bin/bash}
       register: result
       changed_when: "'configured' in result.stdout or 'created' in result.stdout"
 
@@ -88,7 +81,7 @@
         kubectl kustomize \
           "https://github.com/nginx/nginx-gateway-fabric/config/crd/gateway-api/standard?ref={{ ngf_chart_version }}" \
           | kubectl apply -f -
-      args: {warn: false, executable: /bin/bash}
+      args: {executable: /bin/bash}
       register: result
       changed_when: "'configured' in result.stdout or 'created' in result.stdout"
 
@@ -105,7 +98,7 @@
           --set config.kind="ControllerConfiguration" \
           --set config.enableGatewayAPI=true \
           --set crds.enabled=true
-      args: {warn: false, executable: /bin/bash}
+      args: {executable: /bin/bash}
       register: cm_install
       changed_when: "'STATUS: deployed' in cm_install.stdout or 'installed' in cm_install.stdout"
 
@@ -118,52 +111,52 @@
     - name: Bootstrap internal CA and issuers for NGF
       ansible.builtin.shell: |
         set -o pipefail
-          cat <<EOF | kubectl apply -f -
-          apiVersion: cert-manager.io/v1
-          kind: Issuer
-          metadata: {name: selfsigned-issuer, namespace: {{ ngf_namespace }}}
-          spec: {selfSigned: {}}
-          ---
-          apiVersion: cert-manager.io/v1
-          kind: Certificate
-          metadata: {name: nginx-gateway-ca, namespace: {{ ngf_namespace }}}
-          spec:
-            isCA: true
-            commonName: nginx-gateway
-            secretName: nginx-gateway-ca
-            privateKey: {algorithm: RSA, size: 2048}
-            issuerRef: {name: selfsigned-issuer, kind: Issuer, group: cert-manager.io}
-          ---
-          apiVersion: cert-manager.io/v1
-          kind: Issuer
-          metadata: {name: nginx-gateway-issuer, namespace: {{ ngf_namespace }}}
-          spec: {ca: {secretName: nginx-gateway-ca}}
-          ---
-          apiVersion: cert-manager.io/v1
-          kind: Certificate
-          metadata: {name: nginx-gateway, namespace: {{ ngf_namespace }}}
-          spec:
-            secretName: server-tls
-            usages: ["digital signature", "key encipherment"]
-            dnsNames: [ngf-nginx-gateway-fabric.{{ ngf_namespace }}.svc]
-            issuerRef: {name: nginx-gateway-issuer}
-          ---
-          apiVersion: cert-manager.io/v1
-          kind: Certificate
-          metadata:
-            name: nginx
-            namespace: nginx-gateway
-          spec:
-            secretName: agent-tls
-            usages:
-            - "digital signature"
-            - "key encipherment"
-            dnsNames:
-            - "*.cluster.local"
-            issuerRef:
-              name: nginx-gateway-issuer
-          EOF
-      args: {warn: false, executable: /bin/bash}
+        cat <<EOF | kubectl apply -f -
+        apiVersion: cert-manager.io/v1
+        kind: Issuer
+        metadata: {name: selfsigned-issuer, namespace: {{ ngf_namespace }}}
+        spec: {selfSigned: {}}
+        ---
+        apiVersion: cert-manager.io/v1
+        kind: Certificate
+        metadata: {name: nginx-gateway-ca, namespace: {{ ngf_namespace }}}
+        spec:
+          isCA: true
+          commonName: nginx-gateway
+          secretName: nginx-gateway-ca
+          privateKey: {algorithm: RSA, size: 2048}
+          issuerRef: {name: selfsigned-issuer, kind: Issuer, group: cert-manager.io}
+        ---
+        apiVersion: cert-manager.io/v1
+        kind: Issuer
+        metadata: {name: nginx-gateway-issuer, namespace: {{ ngf_namespace }}}
+        spec: {ca: {secretName: nginx-gateway-ca}}
+        ---
+        apiVersion: cert-manager.io/v1
+        kind: Certificate
+        metadata: {name: nginx-gateway, namespace: {{ ngf_namespace }}}
+        spec:
+          secretName: server-tls
+          usages: ["digital signature", "key encipherment"]
+          dnsNames: [ngf-nginx-gateway-fabric.{{ ngf_namespace }}.svc]
+          issuerRef: {name: nginx-gateway-issuer}
+        ---
+        apiVersion: cert-manager.io/v1
+        kind: Certificate
+        metadata:
+          name: nginx
+          namespace: nginx-gateway
+        spec:
+          secretName: agent-tls
+          usages:
+          - "digital signature"
+          - "key encipherment"
+          dnsNames:
+          - "*.cluster.local"
+          issuerRef:
+            name: nginx-gateway-issuer
+        EOF
+      args: {executable: /bin/bash}
       register: ngf_ca
       changed_when: "'created' in ngf_ca.stdout"
 
@@ -172,7 +165,7 @@
         helm install \
           ngf oci://ghcr.io/nginx/charts/nginx-gateway-fabric \
           --create-namespace -n nginx-gateway
-      args: {warn: false}
+      args: {executable: /bin/bash}
       register: ngf_install
       changed_when: "'STATUS: deployed' in ngf_install.stdout or 'installed' in ngf_install.stdout"
 
@@ -201,7 +194,7 @@
                   parentRefs:
                   - {name: {{ gateway_name }}, namespace: default, kind: Gateway}
         EOF
-      args: {warn: false, executable: /bin/bash}
+      args: {executable: /bin/bash}
       register: le_issuer
       changed_when: "'created' in le_issuer.stdout"
 
@@ -230,6 +223,6 @@
               certificateRefs:
               - {kind: Secret, name: cafe-secret}
         EOF
-      args: {warn: false, executable: /bin/bash}
+      args: {executable: /bin/bash}
       register: gw_apply
       changed_when: "'created' in gw_apply.stdout"

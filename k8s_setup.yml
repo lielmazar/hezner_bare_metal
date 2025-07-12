@@ -1,4 +1,5 @@
 - name: Kubernetes control plane setup
+
   hosts: myhosts
   vars_prompt:
     - name: luks_passphrase
