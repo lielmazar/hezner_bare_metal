@@ -1,16 +1,18 @@
 - name: Kubernetes control plane setup
-
   hosts: myhosts
-  vars_prompt:
-    - name: luks_passphrase
-      prompt: "Enter LUKS disk encryption passphrase"
-      private: true
 
   vars:
     dropbear_port: 22
     crio_version: "v1.33"
     k8s_version: "v1.33"
     control_plane_dns: "kcp.cservices.co.il"
+    luks: !vault |
+      $ANSIBLE_VAULT;1.1;AES256
+      38336336373335666133623965353863376539363738616439363337636536623135323031393939
+      3632636564306539363139343932636631383431366437360a303930343630363566346339623263
+      35633230623636313238663562616236306666326630306639346539353865663239653330666638
+      3763353164643033630a333937333030646663633466383339386361363563646535623135326335
+      36303837336538353935356439326238643936336164323161343634316534643431
 
   pre_tasks:
     - name: Remove old SSH key for sv1.cservices.co.il
@@ -394,7 +396,7 @@
               -p {{ dropbear_port }}
               -tt root@{{ inventory_hostname }} cryptroot-unlock
         responses:
-          '.*unlock.*disk.*:': "{{ luks_passphrase }}"
+          '.*unlock.*disk.*:': "{{ luks }}"
       register: unlock_result
       failed_when: false   # Dropbear closes the connection after unlocking
       no_log: false        # Prevent logging sensitive information
