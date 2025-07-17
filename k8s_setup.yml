@@ -86,12 +86,13 @@
         update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
       changed_when: true
 
-    - name: Enabling IPv4 packet forwarding and ip bridges
+    - name: Enabling IPv4 and IPv6 packet forwarding and ip bridges
       ansible.builtin.copy:
         mode: '0644'
         dest: /etc/sysctl.d/99-k8s.conf
         content: |
           net.ipv4.ip_forward = 1
+          net.ipv6.conf.all.forwarding=1
           net.bridge.bridge-nf-call-iptables = 1
           net.bridge.bridge-nf-call-ip6tables = 1
 
@@ -103,6 +104,7 @@
         reload: true
       loop:
         - { name: 'net.ipv4.ip_forward', value: '1' }
+        - { name: 'net.ipv6.conf.all.forwarding', value: '1' }
         - { name: 'net.bridge.bridge-nf-call-iptables', value: '1' }
         - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
 
@@ -438,9 +440,10 @@
       ansible.builtin.command:
         cmd: >
           kubeadm init
-          --pod-network-cidr=10.244.0.0/16
-          --apiserver-advertise-address={{ inventory_hostname }}
-          --control-plane-endpoint={{ control_plane_dns }}
+            --pod-network-cidr=10.244.0.0/16,fd12:5e89:105d::/64
+            --service-cidr=10.96.0.0/12,fd12:5e89:105d:8000::/112
+            --apiserver-advertise-address={{ inventory_hostname }}
+            --control-plane-endpoint={{ control_plane_dns }}
         creates: /etc/kubernetes/admin.conf
 
     - name: Ensure .kube directory exists in user's home
@@ -490,6 +493,23 @@
         kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
       register: flannel_apply
       changed_when: "'created' in flannel_apply.stdout or 'configured' in flannel_apply.stdout"
+
+    - name: Update Flannel ConfigMap with IPv4 and IPv6 configuration
+      vars:
+        net_conf_json: >-
+          {\"EnableIPv4\":true,\"EnableIPv6\":true,\"Network\":\"10.244.0.0/16\",\"IPv6Network\":\"fd12:5e89:105d::/64\",\"EnableNFTables\":false,\"Backend\":{\"Type\":\"vxlan\"}}
+      ansible.builtin.shell: >
+        kubectl patch configmap kube-flannel-cfg -n kube-flannel
+        --type='merge'
+        -p='{"data":{"net-conf.json":"{{ net_conf_json }}"}}'
+      register: kubectl_result
+      changed_when: kubectl_result.rc == 0
+      failed_when: kubectl_result.rc != 0
+
+    - name: Restart kube-flannel-ds
+      ansible.builtin.command: >
+        kubectl rollout restart daemonset kube-flannel-ds -n kube-flannel
+      changed_when: false
 
     - name: Untaint control plane nodes to allow scheduling of non-control plane pods
       ansible.builtin.command: >

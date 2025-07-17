@@ -3,7 +3,8 @@
 
   vars:
     metallb_version: v0.15.2
-    ipaddress_pool_v4: 65.108.21.139/32         # public IPv4 assigned to server
+    ipaddress_pool_v4: 65.108.21.139/32
+    ipaddress_pool_v6: 2a01:4f9:fff1:1f::/64
     gateway_api_version: v1.3.0
     cert_manager_release: cert-manager
     cert_manager_namespace: cert-manager
@@ -11,8 +12,8 @@
     ngf_chart_ref: oci://ghcr.io/nginx/charts/nginx-gateway-fabric
     ngf_chart_version: v2.0.2
     ngf_namespace: nginx-gateway
-    domain: cafe.cservices.co.il          # hostname you’ll serve
-    gateway_name: gateway                 # Gateway resource name
+    domain: ibmfs.cservices.co.il          # hostname you’ll serve
+    gateway_name: ibmfs            # Gateway resource name
 
   tasks:
     - name: Ensure curl, gpg and apt-transport-https are present
@@ -63,7 +64,7 @@
           namespace: metallb-system
         spec:
           addresses:
-          - {{ ipaddress_pool_v4 }}
+          - {{ ipaddress_pool_v6 }}
         ---
         apiVersion: metallb.io/v1beta1
         kind: L2Advertisement
@@ -197,32 +198,3 @@
       args: {executable: /bin/bash}
       register: le_issuer
       changed_when: "'created' in le_issuer.stdout"
-
-    - name: Deploy Gateway resource (TLS terminated by cert-manager)
-      ansible.builtin.shell: |
-        set -o pipefail
-        cat <<EOF | kubectl apply -f -
-        apiVersion: gateway.networking.k8s.io/v1
-        kind: Gateway
-        metadata:
-          name: {{ gateway_name }}
-          namespace: default
-          annotations: {cert-manager.io/cluster-issuer: letsencrypt-prod}
-        spec:
-          gatewayClassName: nginx
-          listeners:
-          - name: http
-            port: 80
-            protocol: HTTP
-          - name: https
-            hostname: "{{ domain }}"
-            port: 443
-            protocol: HTTPS
-            tls:
-              mode: Terminate
-              certificateRefs:
-              - {kind: Secret, name: cafe-secret}
-        EOF
-      args: {executable: /bin/bash}
-      register: gw_apply
-      changed_when: "'created' in gw_apply.stdout"
